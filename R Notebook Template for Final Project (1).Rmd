@@ -1,0 +1,481 @@
+---
+title: "MIS 431 Final Project"
+---
+
+If working in a group with another student, add both of your information below. Only one submission in Blackboard is required.
+
+**Name**: Katherine Booker
+**G Number**: G01068576
+
+
+```{r}
+# Add all library you will need here
+library(tidyverse)
+library(MASS)
+
+
+# This will read in the data frame
+loan_data <- readRDS(file = "/cloud/project/Final Project/loan_data.rds")
+
+# Create training and test data
+set.seed(314)
+train_index <- sample(1:nrow(loan_data), floor(0.7*nrow(loan_data)))
+
+# training
+loan_training <- loan_data[train_index, ]
+
+# test
+loan_test <- loan_data[-train_index, ]
+
+# Function for analyzing confusion matrices
+cf_matrix <- function(actual_vec, pred_prob_vec, positive_val, 
+                      cut_prob = 0.5, search_cut = FALSE) {
+  
+  if (search_cut == FALSE) {
+  actual <- actual_vec == positive_val; pred <- pred_prob_vec >= cut_prob
+  P <- sum(actual); N <- length(actual) - P; TP <- sum(actual & pred)
+  FN <- P - TP; TN <- sum(!(actual) & !(pred)); FP <- N - TN
+  
+  if (TP != 0) { Precision <- TP/(TP + FP); Recall <- TP/(TP + FN)
+                 F1 <- 2*((Precision*Recall)/(Precision + Recall))}
+  
+  if(TP == 0) { Precision = 0; Recall = 0; F1 = 0 }
+ 
+  model_results <- list(confusion_matrix = 
+    data.frame(metric = c("Correct", "Misclassified", "True Positive",
+                           "True Negative","False Negative", "False Positive"),
+               observations = c(TN + TP, FN + FP, TP, TN, FN, FP),
+               rate = c((TN + TP)/(N + P), (FN + FP)/(N + P), TP/P, TN/N, FN/P, FP/N),
+               pct_total_obs = c((TN + TP), (FN + FP), TP, TN, FN, FP)*(1/(N + P)),
+               stringsAsFactors = FALSE),
+    F1_summary = 
+    data.frame(metric = c("Precision", "Recall", "F1 Score"),
+               value = c(Precision, Recall, F1),
+               stringsAsFactors = FALSE))
+return(model_results) } 
+ 
+  if (search_cut == TRUE) {
+    optimal_cut = data.frame(cut_prob = seq(0,1, by = 0.05),
+                             correct_rate = NA, F1_score = NA,
+                             false_pos_rate = NA, false_neg_rate = NA)
+    
+    for (row in (1:nrow(optimal_cut))) {
+      actual <- actual_vec == positive_val 
+      pred <- pred_prob_vec >= optimal_cut$cut_prob[row]
+      P <- sum(actual); N <- length(actual) - P
+      TP <- sum(actual & pred); FN <- P - TP
+      TN <- sum(!(actual) & !(pred)); FP <- N - TN
+  
+      if (TP != 0) { Precision <- TP/(TP + FP); Recall <- TP/(TP + FN)
+          F1 <- 2*((Precision*Recall)/(Precision + Recall))}
+  
+      if(TP == 0) { Precision = 0; Recall = 0; F1 = 0 }
+      
+      optimal_cut[row, 2:5] <- c((TN + TP)/(N + P), F1, FP/N, FN/P)
+    } 
+return(optimal_cut)
+  }
+}
+
+```
+
+**Exporatory Data Analysis Section**
+
+Example Question:
+
+Do loan default rates differ by customer age?
+
+Findings: Yes, customers between 35 and 50 years old have significantly lower default rates than other customers. Customer age appears to be a strong predictor of loan default.
+
+```{r}
+# Summary table
+default_by_age <- loan_data %>% group_by(age_category) %>% 
+                  summarise(total_customers = n(),
+                            customers_who_defaulted = sum(loan_default == "Yes")) %>% 
+                  mutate(default_rate = customers_who_defaulted / total_customers)
+
+# View results
+default_by_age
+
+# Plot the relationship
+ggplot(data = loan_data, mapping = aes(x = age_category, fill = loan_default)) +
+  geom_bar(position = "fill") +
+  labs(title = "Loan Default Rates by Customer Age Category",
+        x = "Customer Age",
+        y = "Proportion of Loan Default (Yes/No)") +
+  coord_flip()
+```
+
+Question 1: If a customer has a higher FICO score, is their loan less likely to default?
+
+Answer: Yes, if the FICO score is higher, the chances of a customer defaulting on their loan is lower. 
+        If the score is under 500, it looks like the majority of customers under that score will default on their loan.
+
+
+```{r}
+#Bin Labels
+binlabels <- c("300-399", "400-499","500-599", "600-699", "700-799", "800+")
+
+#Summary Table
+ficohigh_ratelow <- loan_data %>% mutate(fico_bin = cut(loan_data$fico_score, breaks = c(300, 400, 500, 600, 700, 800, 900), labels = binlabels)) %>% 
+                    group_by(fico_bin) %>%
+                    summarise(total_customers = n(),
+                              
+                              defaulted_customers = sum(loan_default== "Yes")) %>% 
+                    mutate(defaultrate = defaulted_customers / total_customers) 
+#View Table
+ficohigh_ratelow
+
+#Plot
+ggplot(data = loan_data, mapping = aes(x = fico_bin, fill = loan_default)) +
+  geom_bar(position = "fill") +
+  labs(title = "Loan Default Rates by Fico Score",
+        x = "Fico Score",
+        y = "Proportion of Loan Default (Yes/No)") +
+  coord_flip()
+
+
+
+```
+
+Question 2: Would a larger number of inquiries made in the last six months be a "red flag" when it comes to loans?
+
+Answer: Yes, it would. It seems that the largest percent of loan defaults occurs at 4 inquiries within a 6 month period at 37.5%. At 5 inquiries, it is 35.7%. Compared to the 18.6% at 0 inquiries and 25.2% at 1 inquiry, the numbers are significantly higher. This can indicate that the more applications a customer applies for with their credit, the more likely they could be to default on their loan. 
+
+```{r}
+
+#Summary Table
+num_inquire <- loan_data %>% group_by(inq_last_6mths) %>% 
+               summarise(total_customers = n(),
+                         defaulted_customers = sum(loan_default== "Yes")) %>% 
+               mutate(defaultrate_percent = (defaulted_customers / total_customers)*100)
+#View
+num_inquire
+
+#Plot
+ggplot(data = loan_data, mapping = aes(x = inq_last_6mths, fill = loan_default)) +
+  geom_bar(position = "fill") +
+  labs(title = "Loan Defaults by Number of Inquiries Made",
+        x = "# of Inquiries in last 6 months",
+        y = "Proportion of Loan Default (Yes/No)") +
+  coord_flip()
+
+```
+
+Question 3: Are Renters or Home Owners more reliable as customers to the bank?
+
+Answer: By amount of customers, renters and owners come out equal. Percentage wise, home owners are more reliable than renters. However, this is only different by ~6% and indicates that both categories are around the same in terms of reliability. This variable does not appear to be relevant.
+
+```{r}
+
+#Summary Table
+rent_or_own <- loan_data %>% group_by(residence_property) %>% 
+               summarise(total_cust = n(),
+                         default_cust = sum(loan_default == "Yes")) %>% 
+               mutate(rate_custdefault = default_cust / total_cust * 100)
+#View
+rent_or_own
+
+
+```
+
+Question 4: Does a Lower Education Level indicate if a customer is more likely to default on their loans?
+
+Answer: Yes, this would be correct. Those with High School level education or less are more likely to default on their loans.
+
+```{r}
+
+#Summary Table
+edu_level <- loan_data %>% group_by(highest_ed_level) %>% 
+             summarise(total_cust = n(),
+                       loan_def_cust = sum(loan_default == "Yes")) %>% 
+             mutate(rate_default = loan_def_cust / total_cust * 100)
+#View
+edu_level
+
+
+
+```
+
+Question 5: Does a certain bracket of annual income default more often on their loans?
+
+Answer: The bracket of 0 - 50,000 has the largest amount of defaulted loans. 
+
+```{r}
+#Creating Bins and Labels
+income_bin_labels <- c("<= 0", "Up to 50,000", "Up to 100,000", "Up to 200,000", "Up to 300,000", "Up to 400,000", "Up to 500,000")
+loan_data$income_bins <- cut(loan_data$adjusted_annual_inc, breaks = c(-10000, 0, 50000, 100000, 200000, 300000, 400000, 500000), labels = income_bin_labels)
+
+
+#Summary Table
+ann_income <- loan_data %>% group_by(income_bins) %>% 
+              summarise(total_cust = n(),
+                        loan_def_cust = sum(loan_default == "Yes")) %>% 
+              mutate(rate_default_pct = loan_def_cust / total_cust * 100)
+
+#View
+ann_income
+
+#Plot
+ggplot(data = loan_data, aes(x = income_bins, fill = loan_default)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~ loan_default, nrow=1) +
+  coord_flip() + 
+  labs(title = "Loan Defaults by Adjusted Annual Income",
+        x = "Income",
+        y = "# of Customers of Loan Default (Yes/No)")
+```
+
+Question 6: If a loan amount given is higher, are they more likely to default on their loan?
+
+Answer: According to the data, customers default the most when they are given a loan in the 30k to 35k range. However, the next highest ranges were the 0-4999 range and 5000-9999 range. 
+
+```{r}
+#Creating Bins and Labels
+amnt_bin_lab <- c("0-4,999", "5,000-9,999", "10,000-14,999", "15,000-19,999", "20,000-24,999", "25,000-29,999", "30,000-35,000")
+loan_data$amnt_bin <- cut(loan_data$loan_amnt, breaks = c(0, 4999, 9999, 14999, 19999, 24999, 29999, Inf), labels = amnt_bin_lab)
+
+#Summary
+amnt_lent <- loan_data %>% group_by(amnt_bin) %>% 
+              summarise(total_cust = n(),
+                        loan_def_cust = sum(loan_default == "Yes")) %>% 
+              mutate(rate_default_pct = loan_def_cust / total_cust * 100)
+#View
+amnt_lent
+
+#Plot
+ggplot(data= loan_data, aes(loan_amnt, fill = loan_default)) +
+  geom_histogram(bins=8, position = "fill") + 
+  labs(title = "Loan Defaults by Loan Amount",
+        x = "Loan Amount",
+        y = "Proportion of Loan Default (Yes/No)")
+
+
+```
+
+Question 7: What loan amount has the heaviest density in each US region, and are certain regions more likely to default on their loans?
+
+Answer: The 10,000 range for loan amount is the heaviest in all 6 regions. The South region is more likely to default on their loans.
+
+
+```{r}
+#Plot
+ggplot(loan_data, mapping = aes(x = loan_amnt, fill = loan_default)) +
+  geom_density(alpha = .35) +
+  facet_wrap(us_region_residence ~ .) +
+  labs(title = "Density of Loan Amounts by US Region",
+        x = "Loan Amount",
+        y = "Density")
+
+
+```
+
+Question 8: Does a higher income have a correlation to the customer's FICO score? Does a defaulted loan have an association with these two attributes?
+
+Answer: According to the plot, most defaulted loans have lower FICO scores. Higher incomes trend towards being given to customer's with FICO scores being in the 600-750 range.
+
+```{r}
+#Plot
+ggplot(loan_data, mapping = aes(x = adjusted_annual_inc, y = fico_score, color = loan_default)) +
+  geom_point() +
+  facet_wrap(loan_default ~ ., ncol=1) +
+  labs(title = "Loan Defaults by Adjusted Income and FICO Score",
+        x = "Adjusted Income",
+        y = "FICO Score")
+
+
+```
+
+
+**Variable Selection**
+
+**Random Forest Variable Importance**
+Analysis: The "elbow" on this model happens at the US Region variable. This leaves FICO Score, Highest Education Level, and US Region as the only variable to carry forward. 
+
+```{r}
+
+loan_data <- loan_data %>% mutate_if(is.character, as.factor)
+
+set.seed(314)
+
+loan_data_rf <- randomForest(loan_default ~ ., 
+                         data = loan_data, 
+                         importance = TRUE)
+
+# Plot the results
+varImpPlot(loan_data_rf, type = 2,
+           pch = 19, # Point style
+           main = "Variable Importance in the Loan Data Set")
+
+
+```
+
+
+**Predictive Modeling**
+
+**Training Model**
+
+```{r}
+#Create training data with relevant variables
+loan_training <- loan_training %>% 
+                  select(loan_default, fico_score, highest_ed_level, us_region_residence)
+
+```
+
+
+**Classification Method 1: Predicting loan_default** Naive Bayes
+
+Analysis:
+i. Choosing 0.35 as the cut off for this model gives a F1 score of 0.6477 (rounding up to 4 decimal places). Using the training data, the optimal cut off rate gives a correct rate of 86.46% and a false positive rate of 10.31%. The false negative rate with the training data is 24.58%. Looking at these results, the false negative rate indicating that 1/4 of the data will be incorrect and customers will be 25% likely to default on their loans even if it was indicated they were unlikely to do so.  
+
+ii. Looking at the results from the test data  using the same cut off as the training data, the F1 score is 0.6477 which is lower than would like to see, but still closer to being ideal than it would be if under 0.5. The correct percentage comes back at 84.61%, which is similar to the training data. The false positive is similar in that it's at 9.07%. However, the false negative rate is at 37.15% which is 12% higher than the training data and does not seem ideal. This model may not be ideal to use when it comes to predicting the reliability of customers not defaulting on their loans.
+
+
+
+```{r}
+
+naive_bayes_model <- naiveBayes(loan_default ~ .,
+                                data = loan_training)
+
+nb_training_results <- data.frame(loan_training,
+                                  nb_predicted_0.5 = predict(naive_bayes_model,
+                                                           newdata = loan_training,
+                                                           type = "class"),
+                                  predict(naive_bayes_model,
+                                          newdata = loan_training,
+                                          type = "raw"))
+
+cf_matrix(actual_vec = nb_training_results$loan_default,
+          pred_prob_vec = nb_training_results$Yes,
+          positive_val = "Yes", search_cut = TRUE)
+
+nb_test_results <- data.frame(loan_test,
+                              nb_predicted_0.5 = predict(naive_bayes_model,
+                                                         newdata = loan_test,
+                                                         type = "class"),
+                              predict(naive_bayes_model,
+                                      newdata = loan_test,
+                                      type = "raw"))
+
+
+nb_test_results <- nb_test_results %>% mutate(nb_optimal = 0.35)
+
+cf_matrix(actual_vec = nb_test_results$loan_default,
+          pred_prob_vec = nb_test_results$Yes,
+          positive_val = "Yes",
+          cut_prob = 0.35)
+
+```
+
+
+
+**Classification Method 2: Predicting loan_default** LDA
+
+Analysis:
+i. The optimal cut off for this model is 0.3, giving an F1 score of 0.7106. The correct rate using this model for the training data comes out to 86.49% while the false positive is 10.71. The false negative rate is 24.75%. These results are very similar to the results we see in the Naive Bayes model's training data. This indicates the same about customers not being as reliable as the bank would hope. 
+
+ii. Using the same optimal cut off as the training data (0.3), the test data gives a F1 score of 0.7107. This is almost identical to the training data. This also goes for the correct rate (86.11%), false positive rate (10.71%), and the false negative rate (24.75%).
+
+
+
+```{r}
+
+lda_model <- lda(loan_default ~ ., data = loan_training, CV = TRUE)
+
+lda_results <- data.frame(loan_training,
+                          lda_predicted_0.5 = lda_model$class,
+                          lda_model$posterior)
+
+lda_results %>% dplyr::select(loan_default, lda_predicted_0.5, No, No) %>% slice(1:5)
+
+cf_matrix(actual_vec = lda_results$loan_default, pred_prob_vec = lda_results$Yes,
+          positive_val = "Yes", search_cut = TRUE)
+
+cf_matrix(actual_vec = lda_results$loan_default, pred_prob_vec = lda_results$Yes,
+          positive_val = "Yes", cut_prob = 0.3)
+
+```
+
+
+**Classification Method 3: Predicting loan_default** DecisTree
+
+Analysis: 
+i. The optimal cut off for this model is an average of several cut offs that gave the same F1 score (0.656) - making the optimal cutoff 0.45. This gives a correct rate of 86.91%, a false positive rate of 3.75% and a false negative rate of 44.95%.
+
+ii. The test data using this model gives a F1 score of 0.5165. The correct rate is 83.01%, false positive is 4.6%, and false negative is 59.68%. None of these rates are ideal - especially the false negative rate. This number tells us that 2/3 of customers will be assumed to be reliable but will instead default on their loans.
+
+```{r}
+
+set.seed(314)
+
+loan_training_tree <- rpart(loan_default ~ .,
+                             data = loan_training,
+                             method = "class", 
+                             control = rpart.control(cp = 0, minbucket = 4))
+
+printcp(loan_training_tree)
+
+c((0.63805 - 0.0301), (0.63805 + 0.0301)) 
+
+loan_pruned_tree <- prune(loan_training_tree, cp = 0.00925)
+
+rpart.plot(loan_pruned_tree, type = 4, extra = 103, digits = -3,
+           box.palette="GnBu", branch.lty=3, branch.lwd = 3,
+           shadow.col="gray", gap = 0, tweak = 1.1)
+
+dt_loan_training_results <- data.frame(loan_training,
+                                  predict(loan_pruned_tree,
+                                          newdata = loan_training,
+                                          type = "prob"))
+
+dt_loan_training_results %>% slice(1:5)
+
+cf_matrix(actual_vec = dt_loan_training_results$loan_default,
+          pred_prob_vec = dt_loan_training_results$Yes,
+          positive_val = "Yes", search_cut = TRUE)
+
+dt_loan_test_results <- data.frame(loan_test,
+                              predict(loan_pruned_tree,
+                                      newdata = loan_test,
+                                      type = "prob"))
+
+dt_loan_test_results <- dt_loan_test_results %>% 
+                   mutate(tree_pred_optimal = 0.45)
+
+dt_loan_test_results %>% slice(1:5)
+
+cf_matrix(actual_vec = dt_loan_test_results$loan_default ,
+          pred_prob_vec = dt_loan_test_results$Yes,
+          positive_val = "Yes", cut_prob = 0.45)
+
+
+```
+
+Analyze the results from each model:
+i. Use the cf_matrix function to analyze the various error rates on the training data and
+choose an optimal probability cut-off based on this analysis. Write a short analysis of your
+false positive rates, false negative rates, and F1 scoresfor both models to justify your choice.
+
+ii. Using the optimal probability cut-off values from part (i), make predictions on the test data
+and provide a summary of the confusion matrix and discuss model accuracy in terms of the
+various error rates on the test dataset. Remember that when speaking about model
+accuracy, you must always apply your trained model to a test dataset which was not used
+in any of the model building steps.
+
+**Summary of Findings and Recommendations**
+
+1. Key findings from your EDA and Variable Importance analysis. What were the things that stuck out
+for you in this section and why are they important?
+
+Answer: The most important variable was the FICO score, which is important to focus on - a higher FICO score will more often than not indicate to the bank that the customer is reliable when it comes to paying on time. A higher education level is also an important indication of if a customer will default or not. A surprising variable was the US region of residence. This variable showed that customers in the South region are more likely to default on their loan. Additionally, I had assumed that customers making many credit inquiries within 6 months would be more likely to default on their loans - results showed that customers that made 4 inquiries were the most likely to default, this number was closer to the middle of the inquiry range. Lastly, I had wanted to see if there was much of a correlation between FICO score and income. This scatter plot showed that a low income and low FICO score were correlated and also customers with low numbers in both of these would most likely default on their loans. Customers with higher incomes would most likely have an above average or higher FICO score.
+
+2. Your “best” classification model and a confusion matrix analysis for this model, including a
+discussion of either the false negative rate or false positive rate (which ever you think is more
+important to guard against)
+
+Answer: The best model was the Linear discriminant analysis (LDA) with a F1 score of 0.6932. The false negative rate was 35%, which is considerably high.
+
+3. Your recommendations to the bank – how could loan default rates be improved?
+
+Answer: Rates can be improved by only allowing loans to customers with a FICO score higher than 600. 500 and lower, more than half of the customers in those brackets defaulted on their loans. 
+
